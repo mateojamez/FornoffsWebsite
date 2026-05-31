@@ -1,86 +1,51 @@
-# Fornoff Wedding — Event Web Platform
+# Fornoff Wedding - Event Web Platform
 
-Production wedding website for **Taylor Carlson & Connor Fornoff** (October 21, 2026 · Gather Estate, Mesa, AZ). The site serves as the single guest-facing channel for event information, registry discovery, and RSVP capture ahead of a hard **September 21, 2026** response deadline.
+Production wedding website built for my friends. The site is the single guest-facing channel for event information, registry discovery, and RSVP capture ahead of a response deadline.
 
-Built as a **static multi-page front end** with a **Supabase-backed RSVP subsystem**—no custom application server, no build pipeline for content pages, and no guest login flow. Guests identify themselves by name; responses persist in PostgreSQL via the Supabase/PostgREST API.
+Built as a **static multi-page front end** with a **Supabase-backed RSVP subsystem** - no custom application server, no build pipeline for content pages, and no guest login flow. Guests identify themselves by name; responses persist in PostgreSQL via the Supabase/PostgREST API.
 
 ---
 
 ## Problem & impact
 
-| Stakeholder need | How the system addresses it |
-|------------------|-----------------------------|
-| Guests need one place for date, venue, dress code, and FAQs | Structured content pages with semantic HTML, mobile layout, and accessible navigation |
-| Couple needs headcount and dietary data for catering | Per-guest RSVP records with attendance boolean and free-text dietary field |
-| Invitations are sent by **party** (household), not individual login | Party-centric data model; one lookup loads every guest on the invitation |
-| Common names / partial name entry | Dual-index guest search plus client-side disambiguation UI |
-| Registry spans multiple vendors | Curated outbound links (Amazon, Target, Venmo) without embedding third-party widgets |
+
+| Stakeholder need                                                    | How the system addresses it                                                           |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| Guests need one place for date, venue, dress code, and FAQs         | Structured content pages with semantic HTML, mobile layout, and accessible navigation |
+| Couple needs headcount and dietary data for catering                | Per-guest RSVP records with attendance boolean and free-text dietary field            |
+| Invitations are sent by **party** (household), not individual login | Party-centric data model; one lookup loads every guest on the invitation              |
+| Common names / partial name entry                                   | Dual-index guest search plus client-side disambiguation UI                            |
+| Registry spans multiple vendors                                     | Curated outbound links (Amazon, Target, Venmo) without embedding third-party widgets  |
+| Couple needs response tracking before the deadline                  | Unlisted `rsvpcheck/` dashboard buckets guests by attending, declined, or no response |
+
 
 The RSVP path replaces manual tracking (texts, spreadsheets) with **idempotent writes**: re-submitting updates the same row per `guest_id`, so guests can change answers without duplicate records.
-
----
-
-## Architecture
-
-```mermaid
-flowchart TB
-  subgraph client ["Browser (static assets)"]
-    HTML["Multi-page HTML<br/>index · rsvp · faq · registry"]
-    CSS["Design system<br/>styles.css · registry-list.css"]
-    RSVP["rsvp-app.js<br/>ES module SPA slice"]
-  end
-
-  subgraph cdn ["CDN"]
-    ESM["esm.sh → @supabase/supabase-js"]
-  end
-
-  subgraph supabase ["Supabase (managed BaaS)"]
-    PG[(PostgreSQL)]
-    REST["PostgREST API"]
-    RLS["Row Level Security<br/>(configured in Supabase dashboard)"]
-  end
-
-  HTML --> RSVP
-  CSS --> HTML
-  RSVP --> ESM
-  ESM --> REST
-  REST --> RLS --> PG
-
-  subgraph external ["External services"]
-    REG["Amazon · Target · Venmo"]
-    FONTS["Google Fonts"]
-  end
-
-  HTML --> REG
-  HTML --> FONTS
-```
-
-**Pattern:** *Static site + backend-as-a-service.* Marketing and informational pages are plain HTML/CSS. Only `rsvp.html` loads JavaScript. The Supabase anon key ships in `js/supabase-config.js` (standard for public browser clients; authorization is enforced server-side via RLS policies defined in Supabase, not in this repo).
-
-**Runtime dependency:** The browser loads `@supabase/supabase-js` from **esm.sh** at runtime—no bundler, build step, or committed `node_modules`.
 
 ---
 
 ## Repository layout
 
 ```
-├── index.html              # Home: hero, story, schedule, dress code, CTAs
+├── index.html              # Home: hero, story, timeline, dress code, CTAs
 ├── rsvp.html               # RSVP shell + progressive panels
 ├── faq.html                # Accessible FAQ (native <details>)
 ├── css/
-│   ├── styles.css          # Shared design system
+│   ├── styles.css          # Shared design system + rsvpcheck styles
 │   └── registry-list.css   # Registry hub theme
 ├── js/
 │   ├── rsvp-app.js         # Guest lookup, party load, upsert logic
+│   ├── rsvp-check.js       # Dashboard: guests vs RSVP status
 │   └── supabase-config.js  # Project URL + anon key
 ├── registry-list/
 │   └── index.html          # Registry hub (Amazon, Target, Venmo links)
-├── images/                 # Photography and brand assets (referenced files only)
+├── rsvpcheck/
+│   └── index.html          # Unlisted couple dashboard (not in main nav)
+├── images/                 # Photography and brand assets only
 ├── .gitignore
 └── README.md
 ```
 
-Local debugging uses the parent workspace `.vscode/` task (`python -m http.server 8080`).
+Local debugging uses the parent workspace `.vscode/` launch config and task (`python -m http.server 8080`).
 
 ---
 
@@ -106,7 +71,7 @@ rsvps
   updated_at    timestamptz
 ```
 
-**Relationships:** PostgREST nested selects load `parties` with embedded `guests`, and guest lookup joins `parties ( party_name )` for disambiguation labels.
+**Relationships:** PostgREST nested selects load `parties` with embedded `guests`, and guest lookup joins `parties ( party_name )` for disambiguation labels. The dashboard joins `guests` with nested `parties` and merges against a full `rsvps` select.
 
 ---
 
@@ -132,28 +97,34 @@ Server-side `ilike` is intentionally broad; precision happens in `guestMatchesSe
 - **Full name:** normalized first and last must match exactly
 - **Single token:** matches either first or last name field
 
-Normalization lowercases and trims—no phonetic or fuzzy edit distance (deliberate simplicity).
+Normalization lowercases and trims - no phonetic or fuzzy edit distance (deliberate simplicity).
 
 ### 3. Routing
 
-| Outcome | Behavior |
-|---------|----------|
-| 0 matches | Error message; no party data leaked |
-| 1 unique `party_id` | Auto-load party |
+
+| Outcome                   | Behavior                                         |
+| ------------------------- | ------------------------------------------------ |
+| 0 matches                 | Error message; no party data leaked              |
+| 1 unique `party_id`       | Auto-load party                                  |
 | 2+ matches across parties | Render choice list with guest name + party label |
+
 
 ### 4. Party form & persistence
 
 - `loadParty` fetches `parties` with nested `guests` via `.single()`
 - `renderGuestFields` builds per-guest cards (attending select + dietary text)
 - In-memory `responses` object syncs on `input` / `change`
-- Submit maps to rows and **`upsert`s** into `rsvps` with `onConflict: "guest_id"`
+- Submit maps to rows and `**upsert`s** into `rsvps` with `onConflict: "guest_id"`
 
 Dynamic HTML uses `escapeHtml` on all interpolated guest/party strings to mitigate XSS when rendering search results and form cards.
 
 ### 5. Configuration guard
 
-`isConfigReady()` validates URL/key placeholders before creating the Supabase client, surfacing a actionable error if credentials are missing.
+`isConfigReady()` validates URL/key placeholders before creating the Supabase client, surfacing an actionable error if credentials are missing.
+
+### 6. Couple dashboard (`rsvpcheck/`)
+
+`rsvp-check.js` loads all `guests` (with nested party names) and all `rsvps` in parallel, then classifies each guest into attending, not attending, or no response. Summary counts render in the page header; tables use `textContent` (not `innerHTML`) for row data. The page is omitted from site navigation and intended as a bookmark-only ops view for the couple.
 
 ---
 
@@ -161,13 +132,13 @@ Dynamic HTML uses `escapeHtml` on all interpolated guest/party strings to mitiga
 
 The main site uses a **token-driven CSS architecture** (`:root` custom properties for color, typography, shadows, radius). Notable implementation choices:
 
-- **Layered hero:** full-viewport photography, scrim, decorative Victorian decals, and overlapping “paper” story section (`z-index` stacking)
+- **Layered hero:** full-viewport photography, scrim, decorative Victorian decals, and overlapping "paper" story section (`z-index` stacking)
+- **Section composition:** split layouts with framed photography, cream/dark/sage section bands, and lace overlap between dress-code and RSVP CTAs
 - **Responsive typography:** `clamp()` scales display type; `env(safe-area-inset-*)` respects notched devices
 - **Performance:** `loading="lazy"` and `decoding="async"` on non-critical images; font preconnect to Google Fonts
-- **Accessibility:** landmark regions, `aria-current` on nav, `aria-live="polite"` status region on RSVP, semantic `<time datetime="…">`, FAQ via native `<details>` (keyboard-friendly without JS)
 - **Registry page:** intentionally separate theme (`Plus Jakarta Sans`, card layout) to match vendor link-hub patterns while staying on-brand
 
-The registry page links out to third-party checkout flows with `rel="noopener noreferrer"`—no iframe embeds or tracking scripts in the maintained source.
+The registry page links out to third-party checkout flows with `rel="noopener noreferrer"` - no iframe embeds or tracking scripts in the maintained source.
 
 ---
 
@@ -175,9 +146,9 @@ The registry page links out to third-party checkout flows with `rel="noopener no
 
 Static ES modules require a local HTTP origin (file:// will block imports).
 
-**Option A — VS Code (recommended)**
+**Option A - VS Code (recommended)**
 
-Parent workspace includes a launch configuration that starts Python’s static server and opens Chrome:
+Parent workspace includes a launch configuration that starts Python's static server and opens Chrome:
 
 ```bash
 python -m http.server 8080 --bind 127.0.0.1
@@ -185,7 +156,7 @@ python -m http.server 8080 --bind 127.0.0.1
 
 Serve from the `fornoffwedding/` directory, then open `http://localhost:8080`.
 
-**Option B — manual**
+**Option B - manual**
 
 ```bash
 cd fornoffwedding
@@ -201,19 +172,22 @@ export const SUPABASE_URL = "https://<project>.supabase.co";
 export const SUPABASE_ANON_KEY = "<anon-key>";
 ```
 
-Comments in that file reference `NEXT_PUBLIC_SUPABASE_*` variables used elsewhere in the couple’s tooling; this static site reads the same project credentials directly.
+Comments in that file reference `NEXT_PUBLIC_SUPABASE_*` variables used elsewhere in the couple's tooling; this static site reads the same project credentials directly.
 
 ---
 
 ## Security & privacy considerations
 
-| Topic | Approach |
-|-------|----------|
-| **Guest authentication** | None. Possession of a matching invitation name grants access to that party’s RSVP form—a conscious tradeoff for frictionless guest UX on a static site. |
-| **Authorization** | Expected to be enforced via Supabase **RLS** on `guests`, `parties`, and `rsvps` (policies are not versioned in this repo). |
-| **XSS** | User-derived strings escaped before `innerHTML` assignment in RSVP rendering. |
-| **Secrets** | Only the public anon key is present; service role keys must never ship to the browser. |
-| **PII surface** | Names and dietary notes are written to Postgres; no analytics or ad scripts in first-party pages. |
+
+| Topic                    | Approach                                                                                                                                                  |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Guest authentication** | None. Possession of a matching invitation name grants access to that party's RSVP form - a conscious tradeoff for frictionless guest UX on a static site. |
+| **Authorization**        | Expected to be enforced via Supabase **RLS** on `guests`, `parties`, and `rsvps` (policies are not versioned in this repo).                               |
+| **Admin dashboard**      | `rsvpcheck/` is unlisted but public if deployed; anyone who can read all rows via the anon key can use it. Restrict with RLS or remove before going live. |
+| **XSS**                  | User-derived strings escaped before `innerHTML` assignment in RSVP rendering; dashboard rows use `textContent`.                                           |
+| **Secrets**              | Only the public anon key is present; service role keys must never ship to the browser.                                                                    |
+| **PII surface**          | Names and dietary notes are written to Postgres; no analytics or ad scripts in first-party pages.                                                         |
+
 
 ---
 
@@ -223,27 +197,29 @@ The deployable unit is **the static file tree** (HTML, CSS, JS, images). Any sta
 
 1. HTTPS origin (Supabase API calls from the browser)
 2. Valid Supabase project with populated `parties` / `guests` tables
-3. RLS policies aligned with the anon client’s read/write needs
+3. RLS policies aligned with the anon client's read/write needs
 
-No Docker, CI config, or infrastructure-as-code is checked into this repository.
+No Docker, CI config, or infrastructure-as-code is checked into this repository. Remote: [github.com/mateojamez/FornoffsWebsite](https://github.com/mateojamez/FornoffsWebsite).
 
 ---
 
 ## Technology summary
 
-| Layer | Choice | Rationale |
-|-------|--------|-----------|
-| Pages | Hand-authored HTML | Zero build step; easy content edits with stakeholders |
-| Styling | Vanilla CSS | Shared tokens, no framework lock-in, ~1.5k lines of cohesive layout |
-| RSVP logic | ES modules + Supabase JS (esm.sh) | Typed client, nested PostgREST queries, upsert semantics |
-| Database/API | Supabase (PostgreSQL + PostgREST) | Managed auth/RLS, no custom backend to operate |
-| Local server | Python `http.server` | Built-in, cross-platform, sufficient for static + module loading |
+
+| Layer        | Choice                            | Rationale                                                            |
+| ------------ | --------------------------------- | -------------------------------------------------------------------- |
+| Pages        | Hand-authored HTML                | Zero build step; easy content edits with stakeholders                |
+| Styling      | Vanilla CSS                       | Shared tokens, no framework lock-in, ~1,370 lines of cohesive layout |
+| RSVP logic   | ES modules + Supabase JS (esm.sh) | Typed client, nested PostgREST queries, upsert semantics             |
+| Database/API | Supabase (PostgreSQL + PostgREST) | Managed auth/RLS, no custom backend to operate                       |
+| Local server | Python `http.server`              | Built-in, cross-platform, sufficient for static + module loading     |
+
 
 ---
 
 ## Iteration history (selected)
 
-Development proceeded in iterative passes with direct stakeholder feedback (commits through May 2026): initial v1 site shell → love story and visual refinement → RSVP integration with Supabase → FAQ and registry hub → reception timeline redesign → RSVP lookup and questionnaire fixes after user testing with the couple.
+Development proceeded in iterative passes with direct stakeholder feedback (commits through May 2026): initial v1 site shell → love story and visual refinement → RSVP integration with Supabase → FAQ and registry hub → reception timeline redesign → RSVP lookup and questionnaire fixes after user testing → repo cleanup (CSS consolidation, dead asset removal, Supabase dashboard dump deleted from git).
 
 ---
 
