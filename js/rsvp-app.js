@@ -13,6 +13,25 @@ function isConfigReady() {
   return urlOk && keyOk;
 }
 
+/**
+ * Internal hard cutoff for RSVP writes. Deliberately later than the date
+ * shown on the site (September 30): the public date drives responses, this
+ * one is the real close for the caterer, leaving a grace window for
+ * stragglers chased by the October 1 text. Not displayed to guests.
+ *
+ * Stored as UTC because Arizona does not observe DST (MST = UTC-7 all year),
+ * so this is end-of-day October 14, 2026 local time.
+ */
+const RSVP_LOCK_AT = new Date("2026-10-15T06:59:59Z");
+
+function rsvpIsLocked() {
+  return Date.now() >= RSVP_LOCK_AT.getTime();
+}
+
+const LOCKED_MESSAGE =
+  "R.S.V.P.s are now closed and the final headcount has gone to our vendors. " +
+  "Please reach out to Taylor or Connor directly if you need to reach them.";
+
 const els = {
   lookupPanel: document.getElementById("rsvp-lookup"),
   choosePanel: document.getElementById("rsvp-choose"),
@@ -182,6 +201,28 @@ function showParty(p) {
   els.partyPanel.hidden = false;
   els.partyTitle.textContent = `RSVP for ${p.party_name}`;
   renderGuestFields(p.guests || []);
+  applyLockState();
+}
+
+/**
+ * After the internal cutoff, a guest can still look up their invitation and
+ * see what they submitted, but every control is inert so nobody fills out a
+ * form that will only be rejected on submit.
+ */
+function applyLockState() {
+  if (!rsvpIsLocked()) return;
+
+  const submitBtn = els.formRsvp.querySelector('button[type="submit"]');
+  if (submitBtn) {
+    submitBtn.disabled = true;
+    submitBtn.textContent = "R.S.V.P.s are closed";
+  }
+  els.guestFields
+    .querySelectorAll("select, input, textarea")
+    .forEach((field) => {
+      field.disabled = true;
+    });
+  setMessage(LOCKED_MESSAGE, true);
 }
 
 /** @param {Array<{ id: string, first_name: string, last_name?: string | null, party_id: string, parties?: { party_name: string } | { party_name: string }[] | null }>} matches */
@@ -298,6 +339,11 @@ async function findParty(e) {
 async function submitRSVP(e) {
   e.preventDefault();
   if (!supabase || !party) return;
+
+  if (rsvpIsLocked()) {
+    setMessage(LOCKED_MESSAGE, true);
+    return;
+  }
 
   const guests = party.guests || [];
   const rows = guests.map((guest) => ({

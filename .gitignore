@@ -4,3 +4,8 @@ node_modules/
 .env
 .env.local
 *.log
+
+# Send log contains guest phone numbers - never commit
+scripts/send_log.csv
+__pycache__/
+*.pyc

@@ -57,6 +57,7 @@ Schema is inferred from client queries and upserts (DDL lives in Supabase, not i
 parties
   id            uuid (PK)
   party_name    text
+  phone         text | null   -- one number per household; used by the SMS blast
 
 guests
   id            uuid (PK)
@@ -175,6 +176,38 @@ export const SUPABASE_ANON_KEY = "<anon-key>";
 Comments in that file reference `NEXT_PUBLIC_SUPABASE_*` variables used elsewhere in the couple's tooling; this static site reads the same project credentials directly.
 
 ---
+
+## RSVP deadlines
+
+Three distinct dates, only one of which guests ever see:
+
+
+| Date             | Role                                                       | Where it lives                                     |
+| ---------------- | ---------------------------------------------------------- | -------------------------------------------------- |
+| **Sep 30, 2026** | Published deadline shown to guests                         | `index.html` RSVP section, `faq.html` answer       |
+| **Oct 1, 2026**  | Reminder text goes out to non-responding parties           | Operator runs `scripts/send_rsvp_texts.py`         |
+| **Oct 14, 2026** | True cutoff; RSVP writes stop. Never shown to guests.      | `RSVP_LOCK_AT` in `js/rsvp-app.js`                 |
+
+
+The published date is deliberately early so the two-week tail absorbs stragglers. `RSVP_LOCK_AT` is stored as UTC (`2026-10-15T06:59:59Z`) because Arizona stays on MST year-round; that instant is end-of-day October 14 local.
+
+**The client-side lock is a courtesy, not enforcement.** `rsvpIsLocked()` disables the form and rejects submits, but anyone with devtools can still POST to PostgREST with the anon key. To make the cutoff real, add an RLS policy on `rsvps` that rejects writes past the date — otherwise the lock is cosmetic.
+
+## SMS reminder blast
+
+`scripts/send_rsvp_texts.py` is a run-once operator script (stdlib only — nothing to install). It reads `parties` with nested `guests` plus all `rsvps`, buckets each **party**, and sends one Twilio SMS per party phone number.
+
+Bucketing: a party is `no_response` if *any* guest on the invitation has no `rsvps` row at all; otherwise `attending` if at least one guest said yes, else `not_attending`. Default target is `no_response` only.
+
+```bash
+python scripts/send_rsvp_texts.py                    # dry run — prints the plan
+python scripts/send_rsvp_texts.py --send --limit 2   # live test on two parties
+python scripts/send_rsvp_texts.py --send             # full send, asks to confirm
+```
+
+Successful sends are appended to `scripts/send_log.csv`, and reruns skip parties already logged, so a crash mid-blast is safe to resume. That log holds phone numbers and is gitignored. Credentials come from `.env` (see `.env.example`); the script needs the **service role** key, not the anon key.
+
+Carrier note: the `TWILIO_FROM` number must be registered for A2P 10DLC (or be a verified toll-free number) or US carriers will filter the traffic. Registration has a multi-week lead time — start it well before the send date.
 
 ## Security & privacy considerations
 
